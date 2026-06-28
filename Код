@@ -1,0 +1,96 @@
+!pip install -q langchain langchain-community langchain-huggingface faiss-cpu pypdf huggingface_hub
+!pip install --no-cache-dir llama-cpp-python
+# ==============================================================================
+import os   # Системный модуль для проверки путей и существования файлов
+import sys  # Системный модуль для работы с параметрами интерпретатора
+# ==============================================================================
+# 2. ИМПОРТ МОДУЛЕЙ СИСТЕМЫ
+# ==============================================================================
+print("--- [1/4] Подключение модулей и проверка файлов... ---")
+import shutil
+from huggingface_hub import hf_hub_download
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.llms import LlamaCpp
+
+# Настройки путей
+PDF_FILE = "Курсовой проект.pdf"
+MODEL_FILE = "llama3.gguf"
+REPO_ID = "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF"
+FILENAME = "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
+
+# Проверка наличия вашего документа на панели слева
+if not os.path.exists(PDF_FILE):
+    raise FileNotFoundError(f"\n❌ ОШИБКА: Файл '{PDF_FILE}' не найден на панели слева (📁)! Загрузите его заново.")
+
+# ==============================================================================
+# 3. СКАЧИВАНИЕ МОДЕЛИ LLAMA-3 (ЕСЛИ НЕ СКАЧАНА)
+# ==============================================================================
+if not os.path.exists(MODEL_FILE):
+    print("--- 📥 Скачивание модели Llama-3 (~4.8 ГБ, ожидайте окончания)... ---")
+    downloaded_path = hf_hub_download(repo_id=REPO_ID, filename=FILENAME)
+    shutil.copy(downloaded_path, MODEL_FILE)
+    print("--- ✅ Модель успешно загружена! ---")
+else:
+    print("--- ✅ Модель уже загружена ранее. ---")
+
+# ==============================================================================
+# 4. ПОДГОТОВКА RAG (БАЗА ЗНАНИЙ FAISS)
+# ==============================================================================
+print("--- [2/4] Чтение PDF и создание базы знаний... ---")
+loader = PyPDFLoader(PDF_FILE)
+docs = loader.load()
+
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+splits = text_splitter.split_documents(docs)
+
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+vector_store = FAISS.from_documents(splits, embeddings)
+
+# === 5. ЗАГРУЗКА НЕЙРОСЕТИ В ПАМЯТЬ ===
+print("--- [3/4] Загрузка локальной LLM... ---")
+llm = LlamaCpp(
+    model_path=MODEL_FILE,
+    n_ctx=3000,          # Расширяем контекст
+    temperature=0.1,     # Точность фактов
+    max_tokens=512,      # Ограничение на длину ответа
+    verbose=False
+)
+# ==============================================================================
+# 6. ИНТЕРАКТИВНЫЙ ИНТЕРФЕЙС ВОПРОСОВ И ОТВЕТОВ ПРЯМО В COLAB
+# ==============================================================================
+print("Введите ваш вопрос ниже. Для выхода введите 'выход'.")
+
+while True:
+    user_query = input("\nВаш вопрос: ")
+    if user_query.lower() in ['выход', 'exit', 'quit']:
+        print("Работа завершена. До свидания!")
+        break
+    if not user_query.strip():
+        continue
+
+    print("Бот анализирует текст курсового проекта...")
+
+    # Шаг А: Ищем в FAISS топ-3 самых релевантных куска из PDF
+    search_results = vector_store.similarity_search(user_query, k=3)
+    context_text = "\n\n".join([doc.page_content for doc in search_results])
+
+    # Шаг Б: Формируем чистый, понятный для Llama-3 промпт напрямую
+    clean_prompt = f"""System: Ты — точный и полезный ИИ-ассистент. Отвечай на вопрос пользователя развернуто, структурировано и строго на русском языке, используя ТОЛЬКО предоставленный текст курсового проекта. Если в тексте нет ответа, напиши: 'В документе нет информации по этому вопросу'.
+
+Контекст из документа:
+{context_text}
+
+User: {user_query}
+Assistant:"""
+
+    # Шаг В: Прямой вызов модели без LangChain-цепочек (Фикс абракадабры)
+    raw_response = llm.invoke(clean_prompt)
+
+    # Очищаем ответ от возможных технических хвостов разметки
+    final_answer = raw_response.strip().split("User:")[0].split("System:")[0].strip()
+
+    print(f"\nОтвет бота:\n{final_answer}")
+    print("-" * 60)
